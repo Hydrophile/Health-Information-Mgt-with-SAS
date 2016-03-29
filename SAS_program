@@ -1,0 +1,338 @@
+
+/*****************************************************************************************************************************
+Arizona Department of Health Services
+Bureau of Epidemiology and Disease Control
+Office of Disease Integration Services
+******************************************************************************************************************************
+ADAP Drug Manufacturer Quarterly Rebate Processing
+******************************************************************************************************************************
+Programmer:			
+David Balkcom, Evaluation and Data Manager, RWPB
+
+Last updated:
+March 29, 2016
+
+Notes:
+1) Request Avella file from Eric 1 wk before doing rebate 
+2) Download Ramsell U2 report from Ramsell website.
+*****************************************************************************************************************************/
+/* Libraries | Options | Macros */
+LIBNAME desktop "C:\Users\balkcod\Desktop";
+LIBNAME aidsfmts "C:\Aids";
+LIBNAME rebates "F:\Data Warehouse\Rebate Mailings\2015 Q4";
+LIBNAME datasets "G:\Groups\HIV3\Rebates\Data";
+LIBNAME backup "F:\Data Warehouse\Rebate Mailings\RWPB Rebate Files Backup Folder";
+OPTIONS SYMBOLGEN;
+%let avella=avella_adap_manufacturer_20160121_154839;
+%let ramsell=Q42015U2DrugUsageReport;
+%let year=2015;
+%let qtr=4;
+%let qyr=4_2015;   
+******************************************************************************************************************************;
+**Log output;
+/*proc printto*/
+/*	log = 'F:\Data Warehouse\Rebate Mailings\2015 Q4\saslog.log';*/
+/*run;*/
+
+
+
+
+/*****************************************************************************************************************************/
+/* Step 1: Merge NDC code and manufacturer name from the NDC codebook                                           */
+/*****************************************************************************************************************************/
+proc import
+	OUT=ndc
+	DATAFILE= "F:\Data Warehouse\Rebate Mailings\NDC labeler code book.xlsx"
+	DBMS=EXCEL REPLACE;
+	/**/	
+	RANGE="NDCLabelerCode$";
+	GETNAMES=YES;
+	MIXED=NO;
+	SCANTEXT=YES;
+	USEDATE=YES;
+	SCANTIME=YES;
+run;
+** Create [Labeler] field from NDC;
+data ndc; set ndc;
+	ndc2=substr(ndc,5,1);
+	if ndc2='' then labeler='0'||ndc;
+	else labeler=ndc;
+	drop ndc ndc2;
+run;
+
+
+
+
+/*****************************************************************************************************************************/
+/* Step 2: Import Avella dataset and assign formatting                                                                                       */
+/*****************************************************************************************************************************/
+data avella;
+infile "F:\Data Warehouse\Rebate Mailings\&year. Q&qtr.\&avella..txt" firstobs=1 lrecl=450;
+	input 
+	@1 record_type $2.
+	@3 line_no $11.
+	@14 data_level $2.
+	@16 plan_id_qualifier $1.
+	@17 plan_id_code $17.
+	@34 plan_name $30.
+	@64 pharm_id_q $1.
+	@65 pharm_id_code $17.
+	@82 pharm_zip $9.
+	@91 prod_code_q $1.
+	@92 NDC $17.
+	@92 labeler $5.
+	@109 drug_name $30. 
+	@139 DAW $1.
+	@140 qty 15.3
+	@155 unit_meas $2.
+	@157 dose_form $2.
+	@159 dx_code $6.
+	@165 r_days_supply 4.
+	@169 rx_type $2.
+	@171 cnt_rx $8.
+	@179 rx_number $7.
+	@186 date_filled $10.
+	@194 reim_date $8.
+	@202 ther_class_q $1.
+	@203 ther_class_code $17.
+	@220 ther_class_desc $30.
+	@250 plan_reim_q $1.
+	@251 plan_reim_amt 12.
+	@263 adap_liability 12.2
+	@275 fill_code $2.
+	@277 rec_pur_indicator $1.
+	@278 rebate_unit_amt 12.
+	@290 rebate_req_amt 12.
+	@302 form_code $17.
+	@319 doc_id_q $1.
+	@320 doc_id $10.
+	@330 enc_pat_code $17.
+	@347 claim_no $20.
+	@367 filler $34.
+	@401 mfr_name $50.;
+run;
+proc sort data=avella; by labeler; run;
+proc sort data=ndc; by labeler; run;
+** Remove non-applicable obs;
+data avella2;
+	MERGE avella (in=i) ndc (in=j);
+	by labeler;
+			             if adap_liability=1.2 then delete;
+				else if adap_liability=3.6 then delete;
+				else if adap_liability=2.55 then delete;
+				else if adap_liability=6.35 then delete;
+			if i then output;
+run;
+** Display results;
+proc contents data=avella2;
+run;
+proc print data =avella2 (obs=25);
+	var line_no /*rx_number claim_no*/ labeler ndc drug_name qty r_days_supply adap_liability;
+run;
+
+
+
+
+/*****************************************************************************************************************************/
+/* Step 3: Import Ramsell dataset and assign formatting                                                                                   */
+/*****************************************************************************************************************************/
+** 	A) Remove 340-B pharmacies from rebate for Ramsell & Avella, use NCPDP code;
+** 	B) Recode Ramsell to match Avella format and variable names;
+**     C) Remove charges for Medicare | Medicaid dual-eligible clients;
+**          The 2014 charge for those are $1.2, $3.6, $2.55 or $6.35;
+**		D) Remove 340-B pharmacies at MIHS, University of Arizona, El Rio and North Country;
+**		     NCPDP code for El Rio West Pharmacy is 0352916;
+**		E) Remove the charges in Avella pharmacies*/
+**		     NCPDP codes for Avella are 0327026, 0324157, 0354643, 0326721, 0326466, 0354934, 0317114, 0326656;
+proc import OUT=ramsell 
+     DATAFILE="F:\Data Warehouse\Rebate Mailings\&year. Q&qtr.\&ramsell..xls" 
+	 DBMS=EXCEL REPLACE;
+ 	 RANGE="Sheet1$"; 
+     GETNAMES=YES;
+     MIXED=NO;
+     SCANTEXT=YES;
+     USEDATE=YES;
+     SCANTIME=YES;
+run;
+** First transformation: Remove 340-B observations;
+data ramsell2; set ramsell;
+	LENGTH drug_name $15. claim_no $12.; 
+	labeler=substr(NDC, 1, 5);
+	NDC=compress(NDC,'-');
+	drug_name=drug_brand_name;
+	adap_liability=sponsor_total;
+	qty=units;
+	r_days_supply=day_supply;
+	claim_no=claim_number;
+    date_filled=fill_date;
+			if adap_liability=1.2 then delete;
+				else if adap_liability=3.6 then delete;
+				else if adap_liability=2.55 then delete;
+				else if adap_liability=6.35 then delete;
+			if	NCPDP='0352916' then delete;
+				else if NCPDP='0327026' then delete;
+				else if NCPDP='0324157' then delete;
+				else if NCPDP='0354643' then delete;
+				else if NCPDP='0326721' then delete;
+				else if NCPDP='0326466' then delete;
+				else if NCPDP='0354934' then delete;
+				else if NCPDP='0317114' then delete;
+				else if NCPDP='0326656' then delete;
+run;
+proc sort data=ramsell2; by labeler; run;
+proc sort data=ndc nodupkey; by labeler; run;
+** Second transformation: Merge with NDC drug code & format changes;
+data ramsell3;
+	MERGE ndc ramsell2 (in=i) ;
+	by labeler;
+	if i then output;
+run;
+data avella3; set avella2;
+	date_filled2=input(date_filled, yymmdd8.);
+	FORMAT date_filled2 mmddyy8.;
+    DROP date_filled;
+    RENAME date_filled2=date_filled;
+run;
+
+
+
+
+
+/*****************************************************************************************************************************/
+/* Step 4: Merge Avella with Ramsell data and generate invoices                                                                	   */
+/*****************************************************************************************************************************/
+** A few drugs with missing mfr_name and fill the gaps;
+data rebate1; set ramsell3 avella3;
+	if index (drug_name, 'FREESTYLE') GE 1 AND MFR_NAME='' THEN MFR_NAME='ABBOTT LABORATORIES';
+		else if index (drug_name,  'FREESTYLE') ge 1 and mfr_name='' then mfr_name='ABBOTT LABORATORIES';
+		else if index (drug_name,  'ACCU-CHECK') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'ACCU-CHEK') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'SOFTCLIX') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'ONE TOUCH') ge 1 and mfr_name='' then mfr_name='LIFESCAN';
+		else if index (drug_name,  'NEEDLE') ge 1 and mfr_name='' then mfr_name='BD';
+		else if index (drug_name,  'SYRINGE') ge 1 and mfr_name='' then mfr_name='BD';
+		else if index (drug_name,  'BD') ge 1 and mfr_name='' then mfr_name='BD';
+		else if index (drug_name,  'LANOXI') ge 1 and mfr_name='' then mfr_name='COVIS PHARMACEUTICALS';
+		else if index (drug_name,  'FREESTYLE') ge 1 and mfr_name='' then mfr_name='ABBOTT LABORATORIES';
+		else if index (drug_name,  'ACCU-CHECK') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'ACCU-CHEK') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'SOFTCLIX') ge 1 and mfr_name='' then mfr_name='ROCHE';
+		else if index (drug_name,  'ONE TOUCH') ge 1 and mfr_name='' then mfr_name='LIFESCAN';
+		else if index (drug_name,  'PYRIDOXINE') ge 1 and mfr_name='' then mfr_name='MAJOR';
+		else if index (drug_name,  'VITAMIN') ge 1 and mfr_name='' then mfr_name='NATURES CHOICE';
+run;
+** Create slimmed file for mailings;
+data rebate2; set rebate1;
+	keep pharm_id_q pharm_id_code pharm_zip prod_code_q  NDC labeler drug_name qty
+	dose_form r_days_supply rx_number date_filled adap_liability mfr_name;
+run;
+** Tabulate number of Rx fills by manufacturer in SQL; 
+proc sql;
+CREATE VIEW m1 as 
+SELECT DISTINCT
+	labeler,
+	count(labeler) as mfr_cnt,
+	mfr_name
+		FROM rebate2
+		GROUP BY labeler
+		ORDER BY mfr_cnt DESC, mfr_name;
+quit;
+proc sort data=m1 out=m1_sort nodupkey dupout=m1_dup; by labeler; run;
+** Create summary for invoicing;
+proc sql;
+CREATE TABLE m2 as 
+SELECT DISTINCT
+	r1.ndc, 
+	r1.drug_name, 
+	sum(r1.qty) as qty_disp,
+	count(r1.ndc) as n_rx, 
+	sum(r1.adap_liability) as adap_cst,
+ 	r1.labeler, 
+	r1.mfr_name,
+	m1_sort.mfr_cnt
+		FROM rebate2 as r1 
+		JOIN m1_sort on r1.labeler=m1_sort.labeler
+		GROUP BY  r1.ndc, r1.labeler
+		ORDER BY adap_cst desc;
+quit;
+proc sort data=m2 out=rebates.sum&qyr nodupkey; by ndc; run;
+proc sort data=m2 out=m3 nodupkey; by ndc; run;
+** By labeler;
+proc sql;
+CREATE VIEW m4 as
+SELECT DISTINCT
+	labeler,
+	mfr_name,
+	sum(qty_disp) as tot_units,
+	sum(n_rx) as tot_rx,
+	sum(adap_cst) as tot_paid
+		FROM m3 
+		GROUP BY labeler;
+quit;
+** Produce export file for mailings;
+%macro toxls(dst,sht);
+proc export 
+	data=&dst
+	outfile="G:\Groups\Hiv3\Rebates\output\sum&qyr..xls"
+	dbms=excel replace;
+	sheet=&sht;
+run;
+%mend;
+%toxls (work.m4,'MRF_Totals');
+%toxls (work.m3,'SUM&QYR');
+quit;
+/*****************************************************************************************************************************/
+/* Step 5: Test                                                                                                                                                				   */
+/*****************************************************************************************************************************/
+proc sort data=m2 out=firms (keep=labeler mfr_name) nodupkey; by labeler mfr_name; run;
+proc export 
+	DATA=firms
+	OUTFILE="G:\Groups\Hiv3\Rebates\output\FirmListQ&qyr..xls"
+	DBMS=excel REPLACE;
+run;
+proc sql;
+select n(distinct labeler) into: n_firms from work.m2;
+%let n_firms=&n_firms;
+select labeler, mfr_name
+	into :l1-:l&n_firms,:f1-:f&n_firms
+	from work.m2;
+quit;
+data rebates.det&qyr (drop=pharm_id_q pharm_id_code pharm_zip prod_code_q); set rebate2;
+run;
+proc sort data=rebates.det&qyr; by labeler; run;
+ods markup TAGSET= excelxp file="g:\groups\hiv3\rebates\output\det&qyr..xls";
+proc print data=rebates.det&qyr noobs; by labeler; run;
+ods markup close;
+**Export dataset in MS Excel format -- use manufacturer name as file name with month and year end of quarter;
+proc export data=rebates.det&qyr 
+	outfile="g:\groups\hiv3\rebates\output\rebateQ&qtr&year..xls"
+	dbms=excel replace;
+run;
+
+
+
+/*****************************************************************************************************************************/
+/* Custom-level Lists for Pharmaceutical Companies                                                                                         */
+/*****************************************************************************************************************************/
+/* Gilead */
+proc freq data=rebates.det&qyr; tables labeler; run;
+data gilead (drop = mfr_name r_days_supply dose_form rx_number);
+	set rebates.det&qyr;
+	if labeler in (15584 61958);
+run;
+/* Genentech */
+proc freq data=rebates.det&qyr; tables labeler; run;
+data genentech (drop = mfr_name dose_form rx_number);
+	set rebates.det&qyr;
+	if labeler in (00004);
+run;
+
+PROC EXPORT DATA= TMP1.det2_2015 
+            OUTFILE= "F:\Work Library\Hoff_LaRoche_CLD_ Q2_2015.xls" 
+            DBMS=EXCEL LABEL REPLACE;
+     SHEET="CLD Detail"; 
+RUN;
+
+
+/* Galaxo-Smith Kline*/ 
+
